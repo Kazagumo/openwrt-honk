@@ -3,14 +3,16 @@
 set -eu
 
 REPO="kenzok8/openwrt-honk"
-GH_API="https://api.github.com/repos/${REPO}/releases/latest"
+# 用 /releases?per_page=1 而不是 /releases/latest：后者在全部为
+# pre-release 时返回 404（本仓库目前所有 release 都是预发布）。
+GH_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
 GH_PROXY="${GH_PROXY:-https://ghfast.top/}"
 WALL_FEED="src-git wall https://github.com/kenzok8/wall"
 TMP_DIR="/tmp/honk-install"
 
 fetch_text() {
 	url="$1"
-	if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" 2>/dev/null; else wget -qO- "$url" 2>/dev/null; fi
+	if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null; else wget -qO- "$url" 2>/dev/null; fi
 }
 
 download_file() {
@@ -18,7 +20,7 @@ download_file() {
 	# Note: --allow-untrusted is used at install time because these packages are
 	# built in CI and signed with an ephemeral key the device does not trust.
 	# Downloads go through a proxy by default; retry to survive flaky networks.
-	if command -v curl >/dev/null 2>&1; then curl -fL --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$out"; else wget -qO "$out" "$url"; fi
+	if command -v curl >/dev/null 2>&1; then curl -fL --connect-timeout 10 --max-time 300 --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$out"; else wget -qO "$out" "$url"; fi
 }
 
 proxy_url() {
@@ -86,9 +88,10 @@ main() {
 	# 从 release assets 里挑出本机架构的 honk 与 luci-app-honk。
 	# 注意：honk 模式必须排除 luci-app-honk，否则 head -n 1 可能抓错包。
 	honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*honk[^\"]*${ARCH}\.${EXT}\"" | grep -v "luci-app-honk" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*\.${EXT}\"" | grep -v "\-${ARCH}\." | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+	# luci 是 noarch，但 APK 资产仍带架构后缀；优先取本机架构，其次任意一个。
+	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	if [ -z "$luci_asset" ]; then
-		# noarch APK 不带架构后缀；IPK 是 _all.ipk。
+		# IPK 是 _all.ipk，或其它架构的 noarch APK。
 		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	fi
 
