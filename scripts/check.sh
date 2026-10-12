@@ -22,11 +22,15 @@ done
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
 
+grep -q '^CORE_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_PATCH_SHA256=[0-9a-f]\{64\}$' ci/pins.env
 grep -q '^OPENWRT_SDK_SHA256=[0-9a-f]\{64\}$' ci/pins.env
 test "$(sha256sum ci/patches/doona-openwrt.patch | cut -d' ' -f1)" = "$(sed -n 's/^DOONA_PATCH_SHA256=//p' ci/pins.env)"
 source ci/pins.env
+test "$CORE_COMMIT" = "$(sed -n 's/^CORE_COMMIT:=//p' honk/Makefile)"
+test "$DOONA_ARCHIVE" = "$(sed -n 's/^PKG_SOURCE:=//p' luci-app-honk/Makefile)"
+grep -q '^PKG_HASH:=[0-9a-f]\{64\}$' luci-app-honk/Makefile
 
 node <<'NODE'
 const fs = require('fs');
@@ -44,6 +48,10 @@ verify_stage() {
 	test -f "$makefile" || return 0
 	checksum=$(sed -n 's/^PKG_HASH:=//p' "$makefile")
 	test "${#checksum}" -eq 64 || { echo "Invalid stage hash in $makefile" >&2; exit 1; }
+	test "$checksum" = "$(sed -n 's/^PKG_HASH:=//p' luci-app-honk/Makefile)" || {
+		echo "Committed Doona hash differs from staged archive." >&2
+		exit 1
+	}
 	if test -s "artifacts/cache/$archive"; then
 		expected=$(sha256sum "artifacts/cache/$archive" | cut -d' ' -f1)
 		test "$checksum" = "$expected" || { echo "Staged archive hash mismatch: $archive" >&2; exit 1; }
@@ -154,7 +162,7 @@ grep -Fq "! rg -n 'MockBackend|mockBackend|mock-backend' dist" ci/build-doona.sh
 ! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh
 grep -Fq 'node tools/notices.mjs "$STAGE"' ci/build-doona.sh
 grep -Fq 'for file in LICENSE NOTICE CHANGELOG.md README.md; do' ci/build-doona.sh
-grep -Fq 'PKG_HASH:=5cceb43359e17bf7f6fa6029cab598eb56addfcf7a67f563dfa4dbda07646c57' luci-app-honk/Makefile
+grep -Fq 'rm -rf "$STAGE/fonts" "$STAGE/.vite"' ci/build-doona.sh
 
 grep -Fq 'start_job update_check' luci-app-honk/root/usr/libexec/rpcd/honk
 grep -Fq 'update_gate' luci-app-honk/root/usr/libexec/rpcd/honk

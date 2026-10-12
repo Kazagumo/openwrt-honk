@@ -10,44 +10,65 @@ on:
         description: '标记为预发布版本'
         type: boolean
         default: true
+      candidate:
+        description: '只构建候选包，不更新正式软件源'
+        type: boolean
+        default: false
+      auto_publish:
+        description: '完整矩阵成功后自动推进 main 并发布正式版'
+        type: boolean
+        default: false
+      base_sha:
+        description: '自动推进时预期的 main SHA'
+        type: string
+        default: ''
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HONK_SOURCE_TAG: source-${{ github.run_id }}
+
+concurrency:
+  group: honk-release-pipeline
+  cancel-in-progress: false
 
 jobs:
   doona:
     name: Build and publish Doona
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Check package metadata and scripts
+        run: bash scripts/check.sh
       - name: Build Doona interface
         run: ci/build-doona.sh
-      - name: Publish Doona to staging release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          . ci/pins.env
-          # Only this job creates the staging release; build-core only uploads.
-          # (Both used to do view||create, which raced when staging didn't exist.)
-          gh release view staging --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-            gh release create staging --repo "${{ github.repository }}" --title "staging assets" --prerelease --latest=false
-          gh release upload staging "artifacts/cache/$DOONA_ARCHIVE" --repo "${{ github.repository }}" --clobber
+      - name: Verify pinned Doona archive hash
+        run: bash scripts/check.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: doona-source
+          path: |
+            artifacts/cache/doona-*.tar.gz
+            luci-app-honk/generated-doona-stage.mk
+          if-no-files-found: error
 
   build-core:
     name: Build honk-core (multi-arch)
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -63,20 +84,62 @@ jobs:
       - name: Build honk-core (multi-arch)
         run: ci/build-core.sh
 
-      - name: Publish core archives to staging
+      - uses: actions/upload-artifact@v6
+        with:
+          name: core-source
+          path: |
+            artifacts/cache/honk-core-*.tar.gz
+            honk/generated-stage.mk
+            honk/generated-provenance.json
+          if-no-files-found: error
+
+  publish_source:
+    name: Publish isolated source assets
+    needs: [doona, build-core]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: source-artifacts
+          pattern: '*-source'
+      - name: Publish source assets for this run
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          . ci/pins.env
-          # Staging release is created by the doona job; just upload here.
-          gh release upload staging artifacts/cache/honk-core-"$CORE_COMMIT"-*.tar.gz --repo "${{ github.repository }}" --clobber
-          gh release upload staging honk/generated-stage.mk honk/generated-provenance.json --repo "${{ github.repository }}" --clobber
+          files=(source-artifacts/doona-source/artifacts/cache/*.tar.gz
+                 source-artifacts/doona-source/luci-app-honk/generated-doona-stage.mk
+                 source-artifacts/core-source/artifacts/cache/*.tar.gz
+                 source-artifacts/core-source/honk/generated-stage.mk
+                 source-artifacts/core-source/honk/generated-provenance.json)
+          for file in "${files[@]}"; do test -s "$file"; done
+          if ! gh release view "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}" --title "Source assets $HONK_SOURCE_TAG" \
+              --prerelease --latest=false
+          fi
+          test "$(gh api "repos/${{ github.repository }}/git/ref/tags/$HONK_SOURCE_TAG" --jq .object.sha)" = "${{ github.sha }}"
+          mkdir -p existing-source
+          for file in "${files[@]}"; do
+            name=${file##*/}
+            if gh release view "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$name"; then
+              gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
+                --pattern "$name" --dir existing-source --clobber
+              cmp "$file" "existing-source/$name"
+            else
+              gh release upload "$HONK_SOURCE_TAG" "$file" --repo "${{ github.repository }}"
+            fi
+          done
 
   build:
     name: ${{ matrix.arch }} · SDK ${{ matrix.sdk }}
-    needs: [doona, build-core]
+    needs: publish_source
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -93,6 +156,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Prepare SDK action
         uses: actions/checkout@v6
@@ -109,13 +174,16 @@ jobs:
           set -euo pipefail
           # The manifest carries per-arch SHA256 hashes; building without it
           # silently disables hash verification (Makefile falls back to SKIP).
-          gh release download staging --repo "${{ github.repository }}" \
+          gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
             --pattern 'generated-stage.mk' --dir honk --clobber
           # Provenance is installed as /usr/share/honk/provenance.json.
-          gh release download staging --repo "${{ github.repository }}" \
+          gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
             --pattern 'generated-provenance.json' --dir honk --clobber
+          gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
+            --pattern 'generated-doona-stage.mk' --dir luci-app-honk --clobber
 
       - name: Build packages
+        id: sdk
         continue-on-error: true
         uses: ./.github/actions/gh-action-sdk
         env:
@@ -126,14 +194,21 @@ jobs:
           # wall supplies v2ray-geoip / v2ray-geosite (subpackages of v2ray-geodata)
           EXTRA_FEEDS: src-git|wall|https://github.com/kenzok8/wall
           NO_REFRESH_CHECK: true
-          IGNORE_ERRORS: true
+          IGNORE_ERRORS: false
           INDEX: 1
           KEY_BUILD: ${{ secrets.OPKG_KEY_BUILD }}
           PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
 
       - name: Require all release packages
+        if: always()
+        env:
+          SDK_OUTCOME: ${{ steps.sdk.outcome }}
         run: |
           set -euo pipefail
+          [ "$SDK_OUTCOME" = success ] || {
+            echo "::error::SDK build concluded $SDK_OUTCOME"
+            exit 1
+          }
           output_dir="bin/packages/${{ matrix.arch }}/honk"
           for package in honk luci-app-honk; do
             found=0
@@ -190,7 +265,7 @@ jobs:
         with:
           name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
           path: dist/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   release:
     name: Create Release
@@ -203,6 +278,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download artifacts
         uses: actions/download-artifact@v6
@@ -212,14 +288,79 @@ jobs:
 
       - name: Flatten release files
         run: |
+          set -euo pipefail
           mkdir -p dist
+          count=$(find all-artifacts -mindepth 1 -maxdepth 1 -type d -name 'packages-sdk*' | wc -l)
+          test "$count" -eq 12 || { echo "::error::expected 12 SDK artifacts, got $count"; exit 1; }
           find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
+          # LuCI's SDK 24.10 _all.ipk is shared by all six architectures.
+          test "$(find dist -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) | wc -l)" -ge 19
+          (cd dist && sha256sum ./*.apk ./*.ipk > SHA256SUMS)
+
+      - name: Read source asset hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p source-meta
+          gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
+            --pattern 'generated-stage.mk' --dir source-meta
+
+      - name: Record candidate and package manifest
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          SOURCE_TAG: ${{ env.HONK_SOURCE_TAG }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def assignments(path, separator):
+              return dict(line.split(separator, 1) for line in Path(path).read_text().splitlines() if separator in line and not line.startswith('#'))
+
+          pins = assignments('ci/pins.env', '=')
+          core = assignments('honk/Makefile', ':=')
+          doona = assignments('luci-app-honk/Makefile', ':=')
+          source = assignments('source-meta/generated-stage.mk', ':=')
+          packages = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in sorted(Path('dist').iterdir()) if path.suffix in ('.apk', '.ipk')}
+          manifest = {
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'base_sha': os.environ['BASE_SHA'],
+              'source_tag': os.environ['SOURCE_TAG'],
+              'core_commit': pins['CORE_COMMIT'],
+              'doona_commit': pins['DOONA_COMMIT'],
+              'doona_archive': pins['DOONA_ARCHIVE'],
+              'doona_archive_sha256': doona['PKG_HASH'],
+              'core_archives_sha256': {key: value for key, value in source.items() if key.startswith('HONK_HASH_')},
+              'honk_version': core['PKG_VERSION'] + '-r' + core['PKG_RELEASE'],
+              'luci_version': doona['PKG_VERSION'] + '-r' + doona['PKG_RELEASE'],
+              'sdk_sets': sorted(path.name for path in Path('all-artifacts').iterdir() if path.is_dir()),
+              'packages_sha256': packages,
+          }
+          Path('dist/release-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+          PY
 
       - name: Determine tag
         id: meta
         run: |
+          if [ "${{ inputs.candidate }}" = true ] && [ "${{ inputs.auto_publish }}" = true ]; then
+            echo "::error::candidate and auto_publish cannot both be true"
+            exit 1
+          fi
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.candidate }}" = true ]; then
+            echo "tag=candidate-r${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.auto_publish }}" = true ]; then
+            existing_tag=$(git ls-remote --tags origin | awk -v suffix='-r${{ github.run_id }}' '$2 ~ ("^refs/tags/v.*" suffix "$") {sub("refs/tags/", "", $2); print $2}' | head -1)
+            echo "tag=${existing_tag:-v$(TZ=Asia/Shanghai date +%Y.%m.%d)-r${{ github.run_id }}}" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
             # Suffix with run_id so two dispatches on the same day don't share
@@ -322,6 +463,33 @@ jobs:
 
           cat release_notes.md
 
+      - name: Promote validated commit and tag atomically
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          remote_sha=$(gh api "repos/${{ github.repository }}/git/ref/heads/main" --jq .object.sha)
+          tag_sha=$(gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)
+          if [ "$remote_sha" = "$CANDIDATE_SHA" ] && [ "$tag_sha" = "$CANDIDATE_SHA" ]; then
+            echo "main and tag already point to this validated commit"
+          elif [ "$remote_sha" = "$BASE_SHA" ] && [ -z "$tag_sha" ]; then
+            git config user.name kenzok8
+            git config user.email kenzok8@gmail.com
+            git tag "$TAG" "$CANDIDATE_SHA"
+            git -c credential.helper='!gh auth git-credential' push --atomic origin \
+              "$CANDIDATE_SHA:refs/heads/main" "refs/tags/$TAG:refs/tags/$TAG"
+          else
+            echo "::error::main/tag changed: main=$remote_sha tag=$tag_sha"
+            exit 1
+          fi
+
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
@@ -335,11 +503,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify published Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" --jq .object.sha)" = "${{ github.sha }}"
+          mkdir -p published
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir published
+          cp dist/SHA256SUMS published/SHA256SUMS.expected
+          cmp dist/release-manifest.json published/release-manifest.json
+          cmp dist/SHA256SUMS published/SHA256SUMS
+          (cd published && sha256sum -c SHA256SUMS.expected)
+
   upload_feed:
     name: Upload Feed to R2
-    needs: build
+    needs: [build, release]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() }}
+    if: ${{ success() && (github.event_name == 'push' || inputs.auto_publish || (!inputs.candidate && !inputs.prerelease)) }}
     permissions:
       actions: write
       contents: read
@@ -407,7 +589,11 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
-          [ -z "$R2_ACCESS_KEY_ID" ] && { echo "No R2 credentials, skipping"; exit 0; }
+          [ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ] && \
+            [ -n "$R2_ENDPOINT" ] && [ -n "$R2_BUCKET" ] || {
+              echo "::error::R2 credentials are required for a formal release"
+              exit 1
+            }
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
           [r2]
@@ -419,13 +605,22 @@ jobs:
           acl = private
           no_check_bucket = true
           EOF
-          # Skip when feed/ is empty so an empty sync never wipes existing assets.
-          find feed -type f | grep -q . || { echo "feed empty, skip sync"; exit 0; }
-          rclone sync feed/ "r2:${R2_BUCKET}/openwrt-feed/honk/" \
-            --checksum \
-            --fast-list \
-            --transfers 8 \
-            --checkers 16
+          find feed -type f | grep -q . || { echo "::error::feed is empty"; exit 1; }
+          destination="r2:${R2_BUCKET}/openwrt-feed/honk/"
+          # Upload packages first. Publish package indexes last, so a failed
+          # transfer cannot advertise a package that is not on R2 yet.
+          rclone copy feed/ "$destination" --checksum --fast-list \
+            --exclude 'APKINDEX*' --exclude 'Packages*' \
+            --exclude 'packages.adb*' --exclude 'manifest-honk.txt' \
+            --transfers 8 --checkers 16
+          rclone copy feed/ "$destination" --checksum --fast-list \
+            --filter '+ APKINDEX*' --filter '+ Packages*' \
+            --filter '+ packages.adb*' --filter '- **' \
+            --transfers 8 --checkers 16
+          rclone copy feed/ "$destination" --checksum --fast-list \
+            --filter '+ manifest-honk.txt' --filter '- **' \
+            --transfers 8 --checkers 16
+          rclone check feed/ "$destination" --one-way --checksum --fast-list
 
       - name: Trigger unified feed aggregation
         env:

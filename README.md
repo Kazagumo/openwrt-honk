@@ -57,7 +57,9 @@ wget -O - https://raw.githubusercontent.com/kenzok8/openwrt-honk/refs/heads/main
 
 ## 固定源码与构建
 
-核心来自 `https://github.com/Glassyiris/honk` 的完整提交 `5ad13acaaf6e5719d7a2f169225201aae716c416`，Doona 来自 `https://github.com/Zakkaus/doona` 的完整提交 `f8fd5228b3bb49b89d2fcd85b99a8adad69994cf`。Doona 的 OpenWrt 补丁摘要和 OpenWrt 25.12.4 x86/64 官方 SDK 地址、SHA256 均固定在 `ci/pins.env`。构建脚本从这些固定输入生成静态 UI、stock musl 核心和 APK；不会自动发布。
+核心和 Doona 的完整提交、Doona OpenWrt 补丁摘要，以及 OpenWrt 25.12.4 x86/64 官方 SDK 地址和 SHA256 均固定在 `ci/pins.env`。Doona 从源码构建，保留 OpenWrt 同源 API 补丁；归档不含可选中文字体，浏览器使用系统字体。构建脚本从固定输入生成静态 UI、stock musl 核心和安装包。
+
+`auto-bump.yml` 每 6 小时检查上游。发现新提交后，它在独立分支写入 pin、包版本和 Doona 归档哈希，启动 `release.yml` 构建核心、Doona 和全部 12 组 SDK 安装包。任一组失败就停止晋级；全部通过后，自动将经过验证的提交和正式 tag 原子推送到 `main`，发布正式 Release，并更新 R2 软件源。每次构建的源码资产使用独立 tag；候选构建不会更新生产软件源。正式发布后的 Release 或 R2 上传若失败，工作流会报错，需用同批构建产物恢复。
 
 完整构建（包括核心构建）需在大小写敏感的 Linux 文件系统上运行（Doona 上游同时有仅大小写不同的文件）。需要 Rust/rustup、Zig 0.14.1、Node.js 22.13 或更新版本与 Corepack、Git、curl、ripgrep、GNU tar、zstd、`readelf`，以及 `build-essential`、clang、LLVM、libbpf、libelf、pkg-config、CMake、libclang 和 OpenWrt SDK 所需工具。核心交叉编译脚本会核对 Rust/Doona/SDK 输入和 Zig、bpf-linker 版本；SDK 阶段限定 Linux x86_64。
 
@@ -67,10 +69,9 @@ wget -O - https://raw.githubusercontent.com/kenzok8/openwrt-honk/refs/heads/main
 bash scripts/check.sh
 ci/build-doona.sh
 ci/build-core.sh
-ci/build-sdk.sh
 ```
 
-脚本将归档写入被 Git 忽略的 `artifacts/cache/`，APK 写入 `artifacts/apk/`。本地没有生成的阶段归档时，`honk/Makefile` 保留一个 debug 预构建核心作为原型输入；其下载地址可能指向滚动的 debug 资产，但 SHA256 仍必须精确匹配 Makefile 中固定值。正式阶段构建会生成带实际 SHA256 的忽略文件并覆盖该默认值，SDK 构建也会预先把同名归档放进下载缓存；任何散列不匹配都会使构建失败，不跳过校验。
+脚本将源码归档写入被 Git 忽略的 `artifacts/cache/`。12 组 SDK 安装包由 `release.yml` 构建；它从本次运行独立的源码资产 tag 下载带 SHA256 的阶段文件，任一散列不匹配或安装包缺失都会使构建失败。
 
 ## 依赖
 

@@ -1,8 +1,7 @@
 name: Check honk/doona upstream
 
-# Scheduled runs only report upstream changes without touching pins or
-# publishing. Manual runs stage the new pins on an isolated branch and gate
-# them through the real source build before they can be promoted.
+# Scheduled runs pin changed upstream commits and dispatch the full package
+# matrix; only a successful candidate is promoted to main and formal feeds.
 
 on:
   schedule:
@@ -27,6 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect upstream changes
         id: detect
@@ -76,95 +76,132 @@ jobs:
             echo "changes=$changes"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Summarize scheduled check
-        if: github.event_name == 'schedule' && steps.detect.outputs.changed == 'true'
-        run: |
-          {
-            echo "## honk/doona upstream check"
-            echo ""
-            echo "Pending review: ${{ steps.detect.outputs.changes }}"
-            echo ""
-            echo "- honk core: \`${{ steps.detect.outputs.core_new }}\`"
-            echo "- doona: \`${{ steps.detect.outputs.doona_new }}\` (v${{ steps.detect.outputs.doona_version_new }})"
-            echo ""
-            echo "Run this workflow manually to stage and validate the candidate."
-          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.changed == 'true'
+        with:
+          node-version: '24'
+
+      - name: Install Doona build tools
+        if: steps.detect.outputs.changed == 'true'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Stage new pins
         id: stage
-        if: github.event_name == 'workflow_dispatch' && steps.detect.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.detect.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          sed -i \
-            -e "s/^CORE_COMMIT=.*/CORE_COMMIT=${{ steps.detect.outputs.core_new }}/" \
-            -e "s/^DOONA_COMMIT=.*/DOONA_COMMIT=${{ steps.detect.outputs.doona_new }}/" \
-            -e "s/^DOONA_VERSION=.*/DOONA_VERSION=${{ steps.detect.outputs.doona_version_new }}/" \
-            -e "s/^DOONA_ARCHIVE=.*/DOONA_ARCHIVE=doona-$(printf '%s' "${{ steps.detect.outputs.doona_new }}" | cut -c1-8).tar.gz/" \
-            ci/pins.env
-          sed -i \
-            -e "s/^CORE_COMMIT:=.*/CORE_COMMIT:=${{ steps.detect.outputs.core_new }}/" \
-            -e "s/^PKG_VERSION:=.*/PKG_VERSION:$(TZ=Asia/Shanghai date +%Y.%m.%d)/" \
-            honk/Makefile
+          base_sha=$(git rev-parse HEAD)
+          . ci/pins.env
+          core_new='${{ steps.detect.outputs.core_new }}'
+          doona_new='${{ steps.detect.outputs.doona_new }}'
+          today=$(TZ=Asia/Shanghai date +%Y.%m.%d)
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$STAGING"
-          git add ci/pins.env honk/Makefile
-          git commit -m "chore: bump pins (${{ steps.detect.outputs.changes }})"
-          git -c credential.helper='!gh auth git-credential' \
-            push --force origin "HEAD:refs/heads/$STAGING"
-          echo "staging_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Verify candidate source build
-        id: verify
-        if: github.event_name == 'workflow_dispatch' && steps.detect.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # A push made with the workflow's GITHUB_TOKEN does not recursively
-          # trigger `on: push`, so dispatch build.yml explicitly. Its
-          # source-build job runs check.sh, ci/build-doona.sh and
-          # ci/build-core.sh, proving the new commit still patches and compiles.
-          gh workflow run build.yml --ref "$STAGING"
-          run_id=""
-          for _ in $(seq 1 30); do
-            run_id=$(gh run list --workflow=build.yml --branch "$STAGING" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
-            [ -n "$run_id" ] && break
-            sleep 5
-          done
-          if [ -z "$run_id" ]; then
-            echo "::error::could not find the build.yml run for $STAGING"
-            exit 1
-          fi
-          echo "watching source-build and core-build jobs of run $run_id on $STAGING"
-          conclusion=""
-          for _ in $(seq 1 180); do
-            job=$(gh run view "$run_id" --json jobs --jq '.jobs[] | select(.name == "source-build" or .name == "Build honk-core (x86_64 smoke)") | {status: .status, conclusion: (.conclusion // "")} | @json' 2>/dev/null || true)
-            # all watched jobs completed?
-            if [ -n "$job" ]; then
-              pending=$(printf '%s' "$job" | jq -s '[.[] | select(.status != "completed")] | length')
-              if [ "$pending" = 0 ]; then
-                failed=$(printf '%s' "$job" | jq -s '[.[] | select(.conclusion != "success")] | length')
-                if [ "$failed" = 0 ]; then conclusion=success; else conclusion=failure; fi
-                break
-              fi
+          bump_package() {
+            file=$1
+            old_version=$(sed -n 's/^PKG_VERSION:=//p' "$file")
+            old_release=$(sed -n 's/^PKG_RELEASE:=//p' "$file")
+            case "$old_release" in ''|*[!0-9]*) echo "::error::invalid release in $file"; exit 1 ;; esac
+            if [ "$old_version" = "$today" ]; then
+              new_release=$((old_release + 1))
+            else
+              new_release=1
             fi
-            sleep 20
-          done
-          if [ "$conclusion" != success ]; then
-            echo "::error::source-build/core-build concluded ${conclusion:-unfinished}"
-            exit 1
+            sed -i -e "s/^PKG_VERSION:=.*/PKG_VERSION:=$today/" \
+              -e "s/^PKG_RELEASE:=.*/PKG_RELEASE:=$new_release/" "$file"
+          }
+
+          sed -i \
+            -e "s/^CORE_COMMIT=.*/CORE_COMMIT=$core_new/" \
+            -e "s/^DOONA_COMMIT=.*/DOONA_COMMIT=$doona_new/" \
+            -e "s/^DOONA_VERSION=.*/DOONA_VERSION=${{ steps.detect.outputs.doona_version_new }}/" \
+            ci/pins.env
+          if [ "$core_new" != "$CORE_COMMIT" ]; then
+            sed -i "s/^CORE_COMMIT:=.*/CORE_COMMIT:=$core_new/" honk/Makefile
+            bump_package honk/Makefile
           fi
+          if [ "$doona_new" != "$DOONA_COMMIT" ]; then
+            provisional="doona-$(printf '%s' "$doona_new" | cut -c1-8)-candidate.tar.gz"
+            sed -i "s/^DOONA_ARCHIVE=.*/DOONA_ARCHIVE=$provisional/" ci/pins.env
+            ci/build-doona.sh
+            doona_hash=$(sha256sum "artifacts/cache/$provisional" | cut -d' ' -f1)
+            doona_archive="doona-$(printf '%s' "$doona_new" | cut -c1-8)-$(printf '%s' "$doona_hash" | cut -c1-12).tar.gz"
+            mv "artifacts/cache/$provisional" "artifacts/cache/$doona_archive"
+            sed -i "s/^DOONA_ARCHIVE=.*/DOONA_ARCHIVE=$doona_archive/" ci/pins.env
+            sed -i -e "s/^PKG_SOURCE:=.*/PKG_SOURCE:=$doona_archive/" \
+              -e "s/^PKG_HASH:=.*/PKG_HASH:=$doona_hash/" luci-app-honk/Makefile
+            bump_package luci-app-honk/Makefile
+          fi
+          bash scripts/check.sh
+
+          git config user.name kenzok8
+          git config user.email kenzok8@gmail.com
+          git checkout -B "$STAGING"
+          git add ci/pins.env honk/Makefile luci-app-honk/Makefile
+          git commit -m "Update Honk upstream pins" \
+            -m "改动：写入上游 pin，honk $(sed -n 's/^PKG_VERSION:=//p' honk/Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' honk/Makefile)，luci-app-honk $(sed -n 's/^PKG_VERSION:=//p' luci-app-honk/Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' luci-app-honk/Makefile)。" \
+            -m "原因：将上游变更固定到可验证的候选包。"
+          echo "staging_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish candidate branch and immutable Doona source
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . ci/pins.env
+          git -c credential.helper='!gh auth git-credential' \
+            push origin "HEAD:refs/heads/$STAGING"
+          if [ -s "artifacts/cache/$DOONA_ARCHIVE" ]; then
+            gh release view staging >/dev/null 2>&1 || \
+              gh release create staging --title 'staging assets' --prerelease --latest=false
+            gh release upload staging "artifacts/cache/$DOONA_ARCHIVE" --clobber
+          fi
+
+      - name: Build, promote and verify full release
+        id: verify
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN branch pushes do not trigger push workflows. This
+          # dispatch builds all source assets and SDK packages before promotion.
+          output=$(gh workflow run release.yml --ref "$STAGING" \
+            -f auto_publish=true -f base_sha='${{ steps.stage.outputs.base_sha }}')
+          run_id=$(printf '%s\n' "$output" | sed -nE 's|.*actions/runs/([0-9]+).*|\1|p' | tail -1)
+          case "$run_id" in ''|*[!0-9]*) echo "::error::cannot read release run ID: $output"; exit 1 ;; esac
+          expected_sha='${{ steps.stage.outputs.staging_sha }}'
+          actual_sha=
+          for _ in $(seq 1 60); do
+            actual_sha=$(gh run view "$run_id" --json headSha --jq .headSha 2>/dev/null || true)
+            [ -n "$actual_sha" ] && break
+            sleep 2
+          done
+          [ "$actual_sha" = "$expected_sha" ] || {
+            echo "::error::release run $run_id uses $actual_sha, expected $expected_sha"
+            exit 1
+          }
+          result=
+          for _ in $(seq 1 240); do
+            result=$(gh run view "$run_id" --json status,conclusion --jq '.status + " " + (.conclusion // "")')
+            if [ "${result%% *}" = completed ]; then
+              [ "${result#* }" = success ] || { echo "::error::release run $run_id: $result"; exit 1; }
+              break
+            fi
+            sleep 30
+          done
+          [ "${result%% *}" = completed ] || { echo "::error::release run $run_id timed out"; exit 1; }
+          release_tag=$(gh release list --limit 100 --json tagName --jq ".[].tagName | select(endswith(\"-r$run_id\"))" | head -1)
+          [ -n "$release_tag" ] || { echo "::error::formal release for run $run_id is missing"; exit 1; }
+          test "$(gh release view "$release_tag" --json isPrerelease --jq .isPrerelease)" = false
 
           {
-            echo "## Candidate ready for review"
+            echo "## Honk upstream update published"
             echo ""
             echo "Staging branch: \`$STAGING\`"
             echo "Validated commit: \`${{ steps.stage.outputs.staging_sha }}\`"
+            echo "Formal release: \`$release_tag\`"
             echo ""
-            echo "Source build passed (check.sh + doona + honk core x86_64)."
-            echo "Promote only after maintainer review; see the manual bump steps in README."
+            echo "Doona, Honk core and all 12 SDK package sets passed; main, Release and R2 were updated."
           } >> "$GITHUB_STEP_SUMMARY"
