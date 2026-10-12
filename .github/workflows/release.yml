@@ -476,7 +476,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
           remote_sha=$(gh api "repos/${{ github.repository }}/git/ref/heads/main" --jq .object.sha)
-          tag_sha=$(gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)
+          tag_sha=$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')
           if [ "$remote_sha" = "$CANDIDATE_SHA" ] && [ "$tag_sha" = "$CANDIDATE_SHA" ]; then
             echo "main and tag already point to this validated commit"
           elif [ "$remote_sha" = "$BASE_SHA" ] && [ -z "$tag_sha" ]; then
