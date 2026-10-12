@@ -25,7 +25,7 @@
 
 - `honk` —— honk-core 二进制 + 服务脚本 + 默认配置
 - `luci-app-honk` —— LuCI 界面 + 中文翻译（直接编译进主包）+ Doona 资产
-- Geo 数据由 `v2ray-geoip` / `v2ray-geosite`（`kenzok8/wall` 源）提供，可在维护页手动更新或定时更新
+- Geo 数据由 `v2ray-geoip` / `v2ray-geosite` 提供，Honk 与 daede 共用 `/usr/share/v2ray`；可在维护页手动更新或定时更新
 
 ## 一键安装
 
@@ -45,7 +45,7 @@ wget --no-check-certificate -O - https://ghfast.top/https://raw.githubuserconten
 wget -O - https://raw.githubusercontent.com/kenzok8/openwrt-honk/refs/heads/main/scripts/uninstall.sh | ash
 ```
 
-> `v2ray-geoip` / `v2ray-geosite` 由 [kenzok8/wall](https://github.com/kenzok8/wall) 源提供，请确保已添加该源（脚本会检测并提示）。
+> 一键脚本会复用设备已有的 Geo 数据包；缺少时从聚合源下载，下载失败则尝试设备现有软件源。
 
 ## 使用
 

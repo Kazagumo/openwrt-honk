@@ -4,10 +4,10 @@ set -eu
 
 REPO="kenzok8/openwrt-honk"
 # 用 /releases?per_page=1 而不是 /releases/latest：后者在全部为
-# pre-release 时返回 404（本仓库目前所有 release 都是预发布）。
+# pre-release 时返回 404。
 GH_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
 GH_PROXY="${GH_PROXY:-https://ghfast.top/}"
-WALL_FEED="src-git wall https://github.com/kenzok8/wall"
+GEO_FEED="https://down.dllkids.xyz/openwrt-feed"
 TMP_DIR="/tmp/honk-install"
 
 fetch_text() {
@@ -64,6 +64,28 @@ fallback_arch() {
 	esac
 }
 
+geodata_installed() {
+	[ -s /usr/share/v2ray/geoip.dat ] && [ -s /usr/share/v2ray/geosite.dat ] || return 1
+	if [ "$PM" = apk ]; then
+		apk info -e v2ray-geoip >/dev/null 2>&1 && apk info -e v2ray-geosite >/dev/null 2>&1
+	else
+		opkg list-installed v2ray-geoip | grep -q '^v2ray-geoip - ' &&
+			opkg list-installed v2ray-geosite | grep -q '^v2ray-geosite - '
+	fi
+}
+
+apk_file_version() {
+	metadata="$(apk --allow-untrusted adbdump "$1")" || return 1
+	name="$(printf '%s\n' "$metadata" | sed -n 's/^  name: //p' | head -n 1)"
+	version="$(printf '%s\n' "$metadata" | sed -n 's/^  version: //p' | head -n 1)"
+	[ "$name" = "$2" ] && [ -n "$version" ] || return 1
+	printf '%s\n' "$version"
+}
+
+apk_installed_version() {
+	apk list --installed "$1" | awk -v expected="$1-$2" '$1 == expected { found = 1 } END { exit !found }'
+}
+
 main() {
 	PM="$(detect_manager)"
 	[ "$PM" = unsupported ] && { echo "无法识别包管理器（opkg/apk）。" >&2; exit 1; }
@@ -106,12 +128,6 @@ main() {
 	[ -n "$honk_asset" ] || { echo "未找到 $ARCH 的 honk 包。" >&2; exit 1; }
 	[ -n "$luci_asset" ] || { echo "未找到 luci-app-honk 包。" >&2; exit 1; }
 
-	# 确保 wall feed（v2ray-geoip/geosite 依赖来源）已配置。
-	if ! grep -qF "kenzok8/wall" /etc/opkg/customfeeds.conf /etc/apk/repositories 2>/dev/null; then
-		echo "未检测到 wall 源，v2ray-geoip/geosite 依赖可能无法解析。"
-		echo "请先添加：$WALL_FEED"
-	fi
-
 	mkdir -p "$TMP_DIR"
 	honk_file="$TMP_DIR/$(basename "$honk_asset")"
 	luci_file="$TMP_DIR/$(basename "$luci_asset")"
@@ -121,18 +137,67 @@ main() {
 	echo "下载 $luci_asset"
 	download_file "$(proxy_url "$luci_asset")" "$luci_file"
 
-	echo "安装 $honk_file"
-	if [ "$PM" = apk ]; then
-		apk add --allow-untrusted "$honk_file"
+	set -- "$honk_file" "$luci_file"
+	if geodata_installed; then
+		echo "复用已安装的 v2ray-geoip/geosite 数据。"
 	else
-		opkg install "$honk_file"
+		geo_dir="$GEO_FEED/$SDK/$ARCH"
+		geo_listing="$(fetch_text "$geo_dir/" || true)"
+		for pkg in v2ray-geoip v2ray-geosite; do
+			if [ "$PM" = apk ]; then
+				geo_name="$(printf '%s\n' "$geo_listing" | grep -oE "${pkg}-[0-9][^\"/<]*\\.apk" | head -n 1)"
+			else
+				geo_name="$(printf '%s\n' "$geo_listing" | grep -oE "${pkg}_[^\"/<]*_all\\.ipk" | head -n 1)"
+			fi
+			if [ -z "$geo_name" ]; then
+				echo "未找到 $pkg 的 $SDK/$ARCH 安装包，将尝试设备现有软件源。" >&2
+				continue
+			fi
+			geo_file="$TMP_DIR/$geo_name"
+			echo "下载 $geo_dir/$geo_name"
+			if download_file "$geo_dir/$geo_name" "$geo_file"; then
+				if [ "$PM" = apk ]; then apk --allow-untrusted verify "$geo_file" || exit 1; fi
+				set -- "$@" "$geo_file"
+			else
+				echo "$pkg 下载失败，将尝试设备现有软件源。" >&2
+			fi
+		done
 	fi
 
-	echo "安装 $luci_file"
+	echo "安装 honk、luci-app-honk 及所需 geo 数据"
 	if [ "$PM" = apk ]; then
-		apk add --allow-untrusted "$luci_file"
+		apk --allow-untrusted verify "$honk_file" "$luci_file" || exit 1
+		honk_version="$(apk_file_version "$honk_file" honk)" || exit 1
+		luci_version="$(apk_file_version "$luci_file" luci-app-honk)" || exit 1
+		install_rc=0
+		install_output="$(apk add --allow-untrusted "$@" 2>&1)" || install_rc=$?
+		printf '%s\n' "$install_output"
 	else
-		opkg install "$luci_file"
+		opkg install "$@"
+	fi
+
+	if [ "$PM" = apk ]; then
+		apk_installed_version honk "$honk_version" && apk_installed_version luci-app-honk "$luci_version" || {
+			echo "apk 安装失败：目标版本未全部装入（退出码 $install_rc）。" >&2
+			exit 1
+		}
+		if [ "$install_rc" -ne 0 ] && printf '%s\n' "$install_output" | grep -q '^ERROR:'; then
+			echo "apk 安装脚本或依赖报错（退出码 $install_rc），请检查上方错误。" >&2
+			exit "$install_rc"
+		fi
+	fi
+	[ -x /usr/bin/honk-core ] && /usr/bin/honk-core --version >/dev/null 2>&1 &&
+		[ -x /etc/init.d/honk ] && [ -x /usr/libexec/rpcd/honk ] &&
+		[ -s /usr/share/doona/index.html ] &&
+		[ -s /www/luci-static/resources/view/honk/overview.js ] &&
+		jsonfilter -i /usr/share/rpcd/acl.d/luci-app-honk.json -e '@' >/dev/null 2>&1 &&
+		jsonfilter -i /usr/share/luci/menu.d/luci-app-honk.json -e '@' >/dev/null 2>&1 || {
+			echo "安装后 Honk 或 LuCI 关键文件缺失或无效。" >&2
+			exit 1
+		}
+	geodata_installed || { echo "安装后缺少 v2ray-geoip/geosite 数据。" >&2; exit 1; }
+	if [ "$PM" = apk ] && [ "$install_rc" -ne 0 ]; then
+		echo "目标包已核对安装完成；但 apk 仍报告 $install_rc 个错误，请另行检查设备的包管理器状态。" >&2
 	fi
 
 	echo "完成。"
