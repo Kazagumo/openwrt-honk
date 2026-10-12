@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
 PKG_VERSION:=2026.10.10
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # Pinned honk-core revision (Glassyiris/honk feat/native-api), cross-compiled by
 # ci/build-core.sh. The per-architecture asset/hash are filled by that script;
@@ -40,7 +40,7 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=kenzok8
 
 PKG_SOURCE:=$(HONK_ASSET)
-PKG_SOURCE_URL:=https://github.com/kenzok8/openwrt-honk/releases/download/staging/
+PKG_SOURCE_URL?=https://github.com/kenzok8/openwrt-honk/releases/download/staging/
 PKG_HASH:=$(HONK_HASH)
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
