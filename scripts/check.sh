@@ -110,7 +110,7 @@ log_fixture=$(mktemp)
 printf '%s\n' \
 	'Mon Oct  5 10:00:00 2026 daemon.info honk-core[11]: proxy text contains [ERROR]' \
 	'Mon Oct  5 10:00:01 2026 daemon.err honk-core[11]: request failed' \
-	'Mon Oct  5 10:00:02 2026 daemon.info honk-core[11]: WARN candidate check' \
+	'Mon Oct  5 10:00:02 2026 daemon.info honk-core[11]:  WARN candidate check' \
 	'Mon Oct  5 10:00:03 2026 daemon.debug honk-core[11]: debug detail' > "$log_fixture"
 error_logs=$(sh honk/files/log-level-filter.sh error < "$log_fixture")
 warn_logs=$(sh honk/files/log-level-filter.sh warn < "$log_fixture")
@@ -119,6 +119,7 @@ rm -f "$log_fixture"
 case "$error_logs" in *'request failed'*) ;; *) echo 'Syslog error severity was not recognized.' >&2; exit 1 ;; esac
 case "$error_logs" in *'proxy text contains'*|*'WARN candidate'*) echo 'Log body text was misclassified as error.' >&2; exit 1 ;; esac
 case "$warn_logs" in *'WARN candidate check'*) ;; *) echo 'Core warning prefix was not recognized.' >&2; exit 1 ;; esac
+case "$warn_logs" in *'proxy text contains'*|*'debug detail'*) echo 'Warning severity filter included lower-level logs.' >&2; exit 1 ;; esac
 case "$info_logs" in *'proxy text contains [ERROR]'*|*'request failed'*|*'WARN candidate check'*) ;; *) echo 'Info severity filter dropped expected log rows.' >&2; exit 1 ;; esac
 case "$info_logs" in *'debug detail'*) echo 'Info severity filter included debug logs.' >&2; exit 1 ;; esac
 
