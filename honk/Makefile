@@ -69,6 +69,7 @@ endef
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(TAR) -xzf $(DL_DIR)/$(PKG_SOURCE) -C $(PKG_BUILD_DIR) --strip-components=1
+	curl -o $(PKG_BUILD_DIR)/generated-provenance.json $(PKG_SOURCE_URL)/generated-provenance.json
 endef
 
 define Build/Compile
@@ -98,7 +99,7 @@ define Package/honk/install
 
 	$(INSTALL_DIR) $(1)/usr/share/honk
 	$(INSTALL_DATA) $(CURDIR)/files/config.dae $(1)/usr/share/honk/default-config.dae
-	$(INSTALL_DATA) $(CURDIR)/generated-provenance.json $(1)/usr/share/honk/provenance.json
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/generated-provenance.json $(1)/usr/share/honk/provenance.json
 	$(INSTALL_BIN) $(CURDIR)/files/control.sh $(1)/usr/share/honk/control.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lock.sh $(1)/usr/share/honk/lock.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lifecycle.sh $(1)/usr/share/honk/lifecycle.sh
