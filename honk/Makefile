@@ -40,7 +40,7 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=kenzok8
 
 PKG_SOURCE:=$(HONK_ASSET)
-PKG_SOURCE_URL?=https://github.com/Kazagumo/openwrt-honk/releases/download/latest/
+PKG_SOURCE_URL?=https://github.com/Kazagumo/openwrt-honk/releases/latest/download/
 PKG_HASH:=$(HONK_HASH)
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)

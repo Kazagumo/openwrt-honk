@@ -9,7 +9,7 @@ on:
       prerelease:
         description: '标记为预发布版本'
         type: boolean
-        default: true
+        default: false
       candidate:
         description: '只构建候选包，不更新正式软件源'
         type: boolean
@@ -17,7 +17,7 @@ on:
       auto_publish:
         description: '完整矩阵成功后自动推进 main 并发布正式版'
         type: boolean
-        default: false
+        default: true
       base_sha:
         description: '自动推进时预期的 main SHA'
         type: string
