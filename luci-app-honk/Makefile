@@ -10,7 +10,7 @@ PKG_RELEASE:=1
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
 PKG_SOURCE:=doona-34657ab5-c73f88ec2d0e.tar.gz
-PKG_SOURCE_URL:=https://github.com/kenzok8/openwrt-honk/releases/download/staging
+PKG_SOURCE_URL:=https://github.com/Kazagumo/openwrt-honk/releases/download/latest/
 PKG_SOURCE_SUBDIR:=doona
 PKG_HASH:=c73f88ec2d0eefa3d2effed6260da8f1ce174f19fdfc286f4ec1f3fcb1205a1d
 

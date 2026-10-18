@@ -18,9 +18,9 @@ CORE_COMMIT:=0e61ed382c6746773d11e78a9f81a8092aa33c62
 HONK_ASSET_X86_64?=honk-core-$(CORE_COMMIT)-x86_64.tar.gz
 HONK_ASSET_AARCH64?=honk-core-$(CORE_COMMIT)-aarch64.tar.gz
 HONK_ASSET_ARMV7?=honk-core-$(CORE_COMMIT)-armv7.tar.gz
-HONK_HASH_X86_64?=SKIP
-HONK_HASH_AARCH64?=SKIP
-HONK_HASH_ARMV7?=SKIP
+HONK_HASH_X86_64?=skip
+HONK_HASH_AARCH64?=skip
+HONK_HASH_ARMV7?=skip
 
 # ARCH_PACKAGES is the package arch (e.g. arm_cortex-a7_neon-vfpv4);
 # ARCH is the CPU arch (x86_64/aarch64/arm) and coincides for 64-bit.
@@ -40,7 +40,7 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=kenzok8
 
 PKG_SOURCE:=$(HONK_ASSET)
-PKG_SOURCE_URL?=https://github.com/kenzok8/openwrt-honk/releases/download/staging/
+PKG_SOURCE_URL?=https://github.com/Kazagumo/openwrt-honk/releases/download/latest/
 PKG_HASH:=$(HONK_HASH)
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
